@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Real-Time Interactive 3D Particle System</title>
+  
+  <!-- Three.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  
+  <!-- MediaPipe Hands & Camera -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background-color: #050508;
+      color: #fff;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+    }
+    #canvas-container {
+      width: 100%;
+      height: 100%;
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 1;
+    }
+    .hud {
+      position: absolute;
+      z-index: 10;
+      pointer-events: none;
+    }
+    .hud * { pointer-events: auto; }
+    
+    /* Control Panel */
+    .panel {
+      top: 20px;
+      left: 20px;
+      background: rgba(15, 15, 25, 0.65);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 20px;
+      border-radius: 16px;
+      width: 300px;
+      box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+    }
+    h2 { font-size: 1.1rem; margin-bottom: 12px; color: #a5b4fc; text-transform: uppercase; letter-spacing: 1px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; }
+    .btn {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: #e2e8f0;
+      padding: 8px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      transition: all 0.2s ease;
+    }
+    .btn:hover, .btn.active {
+      background: #6366f1;
+      border-color: #818cf8;
+      color: #fff;
+      box-shadow: 0 0 12px rgba(99, 102, 241, 0.5);
+    }
+    .slider-group { margin-bottom: 12px; }
+    .slider-group label { display: flex; justify-content: space-between; font-size: 0.8rem; color: #94a3b8; margin-bottom: 4px; }
+    input[type=range] { width: 100%; accent-color: #6366f1; }
+    
+    /* Video / Hand Tracker HUD */
+    .cam-hud {
+      bottom: 20px;
+      right: 20px;
+      background: rgba(15, 15, 25, 0.65);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 10px;
+      border-radius: 16px;
+      text-align: center;
+    }
+    #webcam { display: none; }
+    #output-canvas { width: 160px; height: 120px; border-radius: 8px; transform: scaleX(-1); }
+    .status { font-size: 0.75rem; color: #38bdf8; margin-top: 6px; }
+  </style>
+</head>
+<body>
+
+  <div id="canvas-container"></div>
+
+  <!-- UI Control Panel -->
+  <div class="hud panel">
+    <h2>Particle Shapes</h2>
+    <div class="grid">
+      <button class="btn active" onclick="setShape('heart')">Heart</button>
+      <button class="btn" onclick="setShape('flower')">Flower</button>
+      <button class="btn" onclick="setShape('saturn')">Saturn</button>
+      <button class="btn" onclick="setShape('fireworks')">Fireworks</button>
+      <button class="btn" onclick="setShape('sphere')">Sphere</button>
+      <button class="btn" onclick="setShape('cube')">Cube</button>
+    </div>
+
+    <h2>Parameters</h2>
+    <div class="slider-group">
+      <label>Particle Size <span id="size-val">2.0</span></label>
+      <input type="range" id="size" min="0.5" max="5.0" step="0.1" value="2.0">
+    </div>
+    <div class="slider-group">
+      <label>Expansion Scale <span id="expand-val">1.0</span></label>
+      <input type="range" id="expand" min="0.2" max="3.0" step="0.1" value="1.0">
+    </div>
+  </div>
+
+  <!-- Camera HUD -->
+  <div class="hud cam-hud">
+    <video id="webcam" playsinline></video>
+    <canvas id="output-canvas"></canvas>
+    <div class="status" id="gesture-status">Hand Tracking: Initializing...</div>
+  </div>
+
+  <script>
+    // --- 1. THREE.JS SCENE SETUP ---
+    const PARTICLE_COUNT = 15000;
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x050508, 0.02);
+
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.z = 30;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+
+    // --- 2. PARTICLE GEOMETRY & SHAPES ---
+    const geometry = new THREE.BufferGeometry();
+    const currentPositions = new Float32Array(PARTICLE_COUNT * 3);
+    const targetPositions = new Float32Array(PARTICLE_COUNT * 3);
+    const colors = new Float32Array(PARTICLE_COUNT * 3);
+
+    // Particle Texture
+    const createParticleTexture = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 64; canvas.height = 64;
+      const ctx = canvas.getContext('2d');
+      const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+      grad.addColorStop(0, 'rgba(255,255,255,1)');
+      grad.addColorStop(0.3, 'rgba(255,255,255,0.8)');
+      grad.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, 64, 64);
+      return new THREE.CanvasTexture(canvas);
+    };
+
+    const material = new THREE.PointsMaterial({
+      size: 2.0,
+      vertexColors: true,
+      map: createParticleTexture(),
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    });
+
+    // Target Shape Generators
+    const shapes = {
+      heart: (i) => {
+        const t = Math.PI * 2 * Math.random();
+        const u = Math.PI * (Math.random() - 0.5);
+        const x = 16 * Math.pow(Math.sin(t), 3);
+        const y = 13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t);
+        const z = u * 5;
+        return [x * 0.6, y * 0.6, z * 0.6];
+      },
+      flower: (i) => {
+        const phi = Math.acos(-1 + (2 * i) / PARTICLE_COUNT);
+        const theta = Math.sqrt(PARTICLE_COUNT * Math.PI) * phi;
+        const r = 10 * (1 + 0.3 * Math.sin(6 * theta));
+        return [
+          r * Math.sin(phi) * Math.cos(theta),
+          r * Math.sin(phi) * Math.sin(theta),
+          r * Math.cos(phi)
+        ];
+      },
+      saturn: (i) => {
+        if (i < PARTICLE_COUNT * 0.4) {
+          // Planet Sphere
+          const u = Math.random(), v = Math.random();
+          const theta = u * 2.0 * Math.PI, phi = Math.acos(2.0 * v - 1.0);
+          const r = 6;
+          return [r * Math.sin(phi) * Math.cos(theta), r * Math.sin(phi) * Math.sin(theta), r * Math.cos(phi)];
+        } else {
+          // Ring
+          const theta = Math.random() * Math.PI * 2;
+          const r = 9 + Math.random() * 6;
+          return [r * Math.cos(theta), (Math.random() - 0.5) * 0.5, r * Math.sin(theta)];
+        }
+      },
+      fireworks: (i) => {
+        const u = Math.random(), v = Math.random();
+        const theta = u * 2.0 * Math.PI, phi = Math.acos(2.0 * v - 1.0);
+        const r = Math.pow(Math.random(), 0.3) * 18;
+        return [r * Math.sin(phi) * Math.cos(theta), r * Math.sin(phi) * Math.sin(theta), r * Math.cos(phi)];
+      },
+      sphere: (i) => {
+        const u = Math.random(), v = Math.random();
+        const theta = u * 2.0 * Math.PI, phi = Math.acos(2.0 * v - 1.0);
+        const r = 12;
+        return [r * Math.sin(phi) * Math.cos(theta), r * Math.sin(phi) * Math.sin(theta), r * Math.cos(phi)];
+      },
+      cube: (i) => {
+        const s = 16;
+        return [(Math.random() - 0.5) * s, (Math.random() - 0.5) * s, (Math.random() - 0.5) * s];
+      }
+    };
+
+    let activeShape = 'heart';
+
+    function calculateTargets(shapeKey) {
+      const generator = shapes[shapeKey];
+      const colorObj = new THREE.Color();
+      for (let i = 0; i < PARTICLE_COUNT; i++) {
+        const [x, y, z] = generator(i);
+        targetPositions[i * 3] = x;
+        targetPositions[i * 3 + 1] = y;
+        targetPositions[i * 3 + 2] = z;
+
+        // Dynamic Colors based on Position
+        colorObj.setHSL((x + 15) / 30, 0.8, 0.6);
+        colors[i * 3] = colorObj.r;
+        colors[i * 3 + 1] = colorObj.g;
+        colors[i * 3 + 2] = colorObj.b;
+      }
+      geometry.attributes.color.needsUpdate = true;
+    }
+
+    // Initialize Arrays
+    for (let i = 0; i < PARTICLE_COUNT * 3; i++) {
+      currentPositions[i] = (Math.random() - 0.5) * 50;
+    }
+
+    geometry.setAttribute('position', new THREE.BufferAttribute(currentPositions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    calculateTargets('heart');
+
+    const particleSystem = new THREE.Points(geometry, material);
+    scene.add(particleSystem);
+
+    // --- 3. UI CONTROLS INTERACTION ---
+    function setShape(key) {
+      activeShape = key;
+      calculateTargets(key);
+      document.querySelectorAll('.grid .btn').forEach(b => b.classList.remove('active'));
+      event.target.classList.add('active');
+    }
+
+    document.getElementById('size').addEventListener('input', (e) => {
+      material.size = parseFloat(e.target.value);
+      document.getElementById('size-val').innerText = e.target.value;
+    });
+
+    let expansionFactor = 1.0;
+    document.getElementById('expand').addEventListener('input', (e) => {
+      expansionFactor = parseFloat(e.target.value);
+      document.getElementById('expand-val').innerText = e.target.value;
+    });
+
+    // --- 4. MEDIAPIPE HAND TRACKING ---
+    const videoElement = document.getElementById('webcam');
+    const canvasElement = document.getElementById('output-canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const statusText = document.getElementById('gesture-status');
+
+    function onResults(results) {
+      canvasCtx.save();
+      canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+      canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        const landmarks = results.multiHandLandmarks[0];
+        
+        // Draw Skeleton HUD
+        drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: '#6366f1', lineWidth: 2});
+        drawLandmarks(canvasCtx, landmarks, {color: '#38bdf8', lineWidth: 1, radius: 2});
+
+        // Track Thumb & Index Finger Distance (Pinch/Expansion Control)
+        const thumbTip = landmarks[4];
+        const indexTip = landmarks[8];
+        const distance = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y);
+
+        // Control Expansion with Pinch Gesture
+        expansionFactor = THREE.MathUtils.lerp(expansionFactor, distance * 5.0, 0.1);
+        document.getElementById('expand').value = expansionFactor.toFixed(1);
+        document.getElementById('expand-val').innerText = expansionFactor.toFixed(1);
+
+        statusText.innerText = `Hand Tracked: Pinch Distance ${(distance * 100).toFixed(0)}%`;
+      } else {
+        statusText.innerText = "No Hand Detected (Use UI Controls)";
+      }
+      canvasCtx.restore();
+    }
+
+    const hands = new Hands({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+
+    hands.setOptions({
+      maxNumHands: 1,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+
+    hands.onResults(onResults);
+
+    const cameraUtils = new Camera(videoElement, {
+      onFrame: async () => {
+        await hands.send({ image: videoElement });
+      },
+      width: 320,
+      height: 240
+    });
+
+    cameraUtils.start().catch(() => {
+      statusText.innerText = "Camera Denied / File Protocol Error";
+      statusText.style.color = "#ef4444";
+    });
+
+    // --- 5. ANIMATION & MORPH PHYSICS LOOP ---
+    const clock = new THREE.Clock();
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const delta = clock.getDelta();
+
+      // Rotate Entire System
+      particleSystem.rotation.y += 0.2 * delta;
+
+      // Morphing Mechanics (Lerp positions to target)
+      const positions = geometry.attributes.position.array;
+      for (let i = 0; i < PARTICLE_COUNT * 3; i++) {
+        const target = targetPositions[i] * expansionFactor;
+        positions[i] += (target - positions[i]) * 4.0 * delta;
+      }
+      geometry.attributes.position.needsUpdate = true;
+
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    animate();
+
+    // Resize Handler
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>
